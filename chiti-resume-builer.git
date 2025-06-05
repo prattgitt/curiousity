@@ -1,0 +1,108 @@
+import os
+import sys
+
+# Ensure SSL support is available
+try:
+    import ssl
+except ImportError:
+    sys.exit("Error: SSL module is required but not available in this environment. Please use a Python build with SSL support.")
+
+import requests
+from fastapi import FastAPI, Request
+from fastapi.responses import HTMLResponse
+from fastapi.staticfiles import StaticFiles
+
+# Attempt to import OpenAI SDK; if unavailable, use a dummy mode
+USE_DUMMY_OPENAI = False
+try:
+    import openai
+    openai.api_key = os.getenv("OPENAI_API_KEY")
+except ImportError:
+    USE_DUMMY_OPENAI = True
+
+# Attempt to import BeautifulSoup
+try:
+    from bs4 import BeautifulSoup
+except ImportError:
+    sys.exit("Error: bs4 module is required but not available in this environment. Please install it to proceed.")
+
+# Ensure 'static' directory exists to prevent mount errors
+os.makedirs("static", exist_ok=True)
+
+app = FastAPI(title="Chiti's Resume Builder")
+
+@app.get("/", response_class=HTMLResponse)
+def index(request: Request):
+    return HTMLResponse("<form method='get' action='/generate'>"
+                        "<label for='job_url'>Job Posting URL:</label>"
+                        "<input type='text' name='job_url' id='job_url' required>"
+                        "<button type='submit'>Generate Resume</button>"
+                        "</form>")
+
+@app.get("/generate", response_class=HTMLResponse)
+def generate_resume(request: Request):
+    job_url = request.query_params.get("job_url")
+    if not job_url:
+        return HTMLResponse("<h3>Error: Missing job_url parameter.</h3>", status_code=400)
+
+    try:
+        resp = requests.get(job_url, timeout=10)
+        resp.raise_for_status()
+    except Exception as e:
+        return HTMLResponse(f"<h3>Unable to fetch URL: {e}</h3>", status_code=400)
+
+    soup = BeautifulSoup(resp.text, "html.parser")
+    for tag in soup(["script", "style"]):
+        tag.decompose()
+    text = soup.get_text(separator=" ")
+    job_description = " ".join(text.split())
+
+    prompt = (
+        "You are an expert résumé generator. Given the job description below, create an ATS-friendly resume "
+        "in the exact format (max 1 A4 page, line spacing 1.15, space before each paragraph):\n"
+        "1. Education\n2. Leadership & Projects\n3. Certifications\n4. Skills\n5. Education\n"
+        "Use the XYZ format for bullet points (Result, Action, Context).\n"
+        f"Job Description:\n{job_description}\n"
+        "Resume:"
+    )
+
+    if USE_DUMMY_OPENAI:
+        resume_content = (
+            "<html><body>"
+            "<h1>Dummy Resume</h1>"
+            "<p>Education: Placeholder University (2020-2024)</p>"
+            "<p>Leadership & Projects: Placeholder Project A, Placeholder Project B</p>"
+            "<p>Certifications: Placeholder Certification</p>"
+            "<p>Skills: Python, Data Analysis, Project Management</p>"
+            "<p>Education: Duplicate entry as per format</p>"
+            "</body></html>"
+        )
+    else:
+        try:
+            response = openai.ChatCompletion.create(
+                model="gpt-4o-mini",
+                messages=[
+                    {"role": "system", "content": "Generate a concise, one-page resume in HTML format."},
+                    {"role": "user", "content": prompt}
+                ],
+                max_tokens=1024,
+                temperature=0.2,
+            )
+            resume_content = response.choices[0].message.content.strip()
+        except Exception as e:
+            return HTMLResponse(f"<h3>OpenAI API error: {e}</h3>", status_code=500)
+
+    return HTMLResponse(resume_content)
+
+# Basic test cases
+if __name__ == "__main__":
+    if USE_DUMMY_OPENAI:
+        print("Running in dummy OpenAI mode. Generated resume preview:")
+        class DummyRequest:
+            query_params = {"job_url": "https://example.com"}
+        print(generate_resume(DummyRequest()).body.decode())
+    else:
+        print("OpenAI is available. Please run using an ASGI server.")
+
+# To run the application:
+#   uvicorn chiti_resume_builder:app --host 0.0.0.0 --port 8000
